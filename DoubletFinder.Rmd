@@ -1,0 +1,98 @@
+---
+title: "DoubletFinder"
+author: "Shuo Wang"
+date: "2023-09-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load in pre-processed seurat object
+
+```{r}
+filename <- file.choose()
+s01 <- readRDS(filename)
+```
+
+Source: <https://github.com/chris-mcginnis-ucsf/DoubletFinder>
+
+**Note**:\
+-Do not apply DoubletFinder to aggregated scRNA-seq data representing multiple distinct samples (e.g., multiple 10X lanes).\
+- Ensure that input data is cleared of low-quality cell clusters. There are a variety of ways to do this, but I usually use the following workflow:\
+- Manually threshold raw gene expression matrices according to RNA nUMIs.\
+- Pre-process data using standard workflow.\
+- Identify clusters with (A) low RNA UMIs, (B) High % mitochondrial reads, and/or (C) Uninformative marker genes.\
+-Remove clusters, **pre-process again**, and run DoubletFinder.
+
+```{r}
+library(DoubletFinder)
+```
+
+### Input arguments to consider
+
+PCs ~ The number of statistically-significant principal components, specified as a range (e.g., PCs = 1:10).  
+
+pN ~ This defines the number of generated artificial doublets, expressed as a proportion of the merged real-artificial data. Default is set to 25%, based on observation that DoubletFinder performance is largely pN-invariant (see McGinnis, Murrow and Gartner 2019, Cell Systems).  
+
+pK ~ This defines the PC neighborhood size used to compute pANN, expressed as a proportion of the merged real-artificial data. No default is set, as pK should be adjusted for each scRNA-seq dataset. Optimal pK values should be estimated using the strategy described below.  
+
+nExp ~ This defines the pANN threshold used to make final doublet/singlet predictions. This value can best be estimated from cell loading densities into the 10X/Drop-Seq device, and adjusted according to the estimated proportion of homotypic doublets.  
+
+### Determine pK
+
+```{r}
+sweep.res.list_s01 <- paramSweep_v3(s01, PCs = 1:30, sct = FALSE)
+sweep.stats_s01 <- summarizeSweep(sweep.res.list_s01, GT = FALSE)
+bcmvn_s01 <- find.pK(sweep.stats_s01) # The plot given by DoubletFinder does not include axis label
+plot(x = bcmvn_s01$pK, y = bcmvn_s01$BCmetric)
+```
+
+### Determine nExp
+
+DoubletFinder is sensitive to heterotypic doublets -- i.e., doublets formed from transcriptionally-distinct cell states -- but is insensitive to homotypic doublets -- i.e., doublets formed from transcriptionally-similar cell states. In our original manuscript, we suggested using DoubletFinder to predict the number of doublets expected from Poisson statistical estimates realting to the droplet microfluidics cell loading density. However, Poisson estimates are agnostic of homotypic doublets, and will thus invariably overestimate the number of detectable doublets.
+
+To address this issue, we suggest users utilize literature-supported cell type annotations to model the proportion of homotypic doublets present in their data.
+
+```{r}
+homotypic.prop <- modelHomotypic(s01@active.ident) # Considering annotations
+nExp_poi <- round(0.01*nrow(s01@meta.data))  ## Assuming doublet formation rate, information from 10X according to cell loading quantity
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+```
+
+Notably, it is conceivable that literature-suppoted cell type annotations may not accurately recapitulate the magnitude of transcriptional divergence necessary for DoubletFinder sensitivity. For example, nominally-homogenous cells (e.g., CD4+ T-cells) may exist along a spectrum of gene expression states (e.g., distinct anatomical locations, disease states, naive/Tregs/Th17 cells, etc.), and doublets formed by cell sub-types may be detectable by DoubletFinder. Thus, we consider doublet number estimates based on Poisson statistics with and without homotypic doublet proportion adjustment to 'bookend' the real detectable doublet rate.  
+
+### Run DoubletFinder
+```{r}
+## Run DoubletFinder with varying classification stringencies ----------------------------------------------------------------
+s01 <- doubletFinder_v3(s01, PCs = 1:30, pN = 0.25, pK = 0.22, nExp = nExp_poi, reuse.pANN = FALSE, sct = FALSE)
+
+s01 <- doubletFinder_v3(s01, PCs = 1:30, pN = 0.25, pK = 0.22, nExp = nExp_poi.adj, reuse.pANN = "pANN_0.25_0.22_9", sct = FALSE)
+```
+
+### DimPlot
+```{r}
+DimPlot(s01, reduction = "umap",
+        group.by = c("DF.classifications_0.25_0.22_9"))
+```
+### Filter Doublets
+```{r}
+length(Cells(s01))
+s01 <- subset(s01, subset = DF.classifications_0.25_0.22_9 == "Singlet")
+length(Cells(s01))
+```
+
+### Recluster
+```{r}
+s01 <- FindNeighbors(s01, dims = 1:30)
+s01 <- FindClusters(s01, resolution = 0.5)
+s01 <- RunUMAP(s01, dims = 1:30)
+DimPlot(s01, reduction = "umap")
+```
+
+### Save RDS
+```{r}
+saveRDS(s01, file = "s01_doublet_removed.rds")
+```
+
