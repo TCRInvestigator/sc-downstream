@@ -79,6 +79,7 @@ s01 <- FindVariableFeatures(s01, selection.method = "vst", nfeatures = 2000)
 ```{r}
 s01 <- ScaleData(s01, features = rownames(s01))
 ```
+Note, `features` default is variable features.
 
 #### Regress out cell cycle effects
 
